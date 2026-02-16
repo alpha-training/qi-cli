@@ -47,5 +47,4 @@ case "$TARGET" in
         ;;
 esac
 
-rm qi.q
 echo "✅ Done!"
