@@ -28,7 +28,7 @@ type QiConfig struct {
 func main() {
 	fmt.Printf("--- Qi CLI (OS: %s, Arch: %s) ---\n", runtime.GOOS, runtime.GOARCH)
 
-	// 1. Resolve Configuration (Alias -> Env -> Config -> Wizard)
+	// 1. Resolve Configuration (Env -> Config -> Wizard)
 	conf := resolveConfig()
 	
 	// 2. Locate binary
@@ -41,7 +41,7 @@ func main() {
 	// 3. Mac-specific OpenSSL
 	var sslPath string
 	if runtime.GOOS == "darwin" {
-		sslPath = "/usr/local/opt/openssl@1.1/lib" // Simplified for brevity
+		sslPath = "/usr/local/opt/openssl@1.1/lib" 
 	}
 
 	// 4. Temporary Bootstrap
@@ -60,6 +60,7 @@ func main() {
 		} else if runtime.GOOS == "windows" {
 			winArgs := append([]string{"/c", "start", "/b", "/affinity", conf.Cores, "/wait", qPath}, qArgs...)
 			cmd = exec.Command("cmd", winArgs...)
+			fmt.Printf("⚙️  Affinity: Windows mask 0x%s\n", conf.Cores)
 		} else {
 			cmd = exec.Command(qPath, qArgs...)
 		}
@@ -82,58 +83,26 @@ func main() {
 // --- Hierarchy of Truth ---
 
 func resolveConfig() QiConfig {
-	// A. Check for Shell Alias (Linux/Mac only)
-	if runtime.GOOS != "windows" {
-		// Try to extract alias from interactive bash
-		aliasCmd := exec.Command("bash", "-i", "-c", "alias q")
-		out, err := aliasCmd.CombinedOutput()
-		if err == nil && strings.Contains(string(out), "alias q=") {
-			conf := parseAlias(string(out))
-			if conf.QHome != "" {
-				fmt.Println("✨ Using settings from shell alias 'q'")
-				return conf
-			}
-		}
-	}
-
-	// B. Check Environment
+	// A. Check Environment Variable (Highest Priority)
 	if envQHome := os.Getenv("QHOME"); envQHome != "" {
+		fmt.Printf("🌱 Using QHOME from environment: %s\n", envQHome)
 		return QiConfig{QHome: envQHome, UseTask: false, Cores: "0,1"}
 	}
 
-	// C. Check Config File
+	// B. Check Config File
 	dirPath := filepath.Join(os.Getenv("HOME"), configDir)
-	if runtime.GOOS == "windows" { dirPath = filepath.Join(os.Getenv("USERPROFILE"), configDir) }
+	if runtime.GOOS == "windows" {
+		dirPath = filepath.Join(os.Getenv("USERPROFILE"), configDir)
+	}
 	
 	filePath := filepath.Join(dirPath, configFileName)
 	if data, err := os.ReadFile(filePath); err == nil {
+		fmt.Printf("📄 Using configuration from: %s\n", filePath)
 		return parseConfigFile(string(data))
 	}
 
-	// D. Wizard
+	// C. Wizard (Fallback)
 	return runWizard(filePath)
-}
-
-func parseAlias(line string) QiConfig {
-	conf := QiConfig{Cores: "0,1", UseTask: false}
-	// Extract cores if taskset present
-	if strings.Contains(line, "taskset -c") {
-		conf.UseTask = true
-		parts := strings.Split(line, "taskset -c")
-		if len(parts) > 1 {
-			conf.Cores = strings.Fields(parts[1])[0]
-		}
-	}
-	// Extract path to derive QHOME
-	fields := strings.Fields(line)
-	for _, f := range fields {
-		f = strings.Trim(f, "'\"")
-		if strings.HasSuffix(f, "/q") {
-			conf.QHome = filepath.Dir(filepath.Dir(f))
-			break
-		}
-	}
-	return conf
 }
 
 func parseConfigFile(data string) QiConfig {
@@ -156,7 +125,6 @@ func findQExecutable(qhome string) (string, error) {
 	ext := ""
 	if runtime.GOOS == "windows" { ext = ".exe" }
 	
-	// Priority: bin/ -> arch/
 	var arch string
 	switch runtime.GOOS {
 	case "linux": arch = "l64"
@@ -172,7 +140,7 @@ func findQExecutable(qhome string) (string, error) {
 	for _, p := range paths {
 		if _, err := os.Stat(p); err == nil { return p, nil }
 	}
-	return "", fmt.Errorf("could not find q in %s", qhome)
+	return "", fmt.Errorf("could not find q in %s/bin or %s/%s", qhome, qhome, arch)
 }
 
 func runWizard(configPath string) QiConfig {
@@ -189,7 +157,11 @@ func runWizard(configPath string) QiConfig {
 		ans, _ := reader.ReadString('\n')
 		if strings.ToLower(strings.TrimSpace(ans)) == "y" {
 			useTask = true
-			fmt.Print("🔢 Cores/Mask (e.g. 2,3): ")
+			label := "🔢 Core List (e.g. 2,3): "
+			if runtime.GOOS == "windows" {
+				label = "🔢 Affinity Mask (Hex, e.g. 3): "
+			}
+			fmt.Print(label)
 			cores, _ = reader.ReadString('\n')
 			cores = strings.TrimSpace(cores)
 		}
@@ -199,5 +171,7 @@ func runWizard(configPath string) QiConfig {
 	_ = os.MkdirAll(filepath.Dir(configPath), 0755)
 	content := fmt.Sprintf("QHOME=%s\nUSE_TASK=%t\nCORES=%s\n", qhome, useTask, cores)
 	_ = os.WriteFile(configPath, []byte(content), 0644)
+	
+	fmt.Printf("✅ Config saved to %s\n", configPath)
 	return conf
 }
