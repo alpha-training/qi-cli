@@ -17,26 +17,35 @@ build_bin() {
     chmod +x $DIST_DIR/$APP_NAME$suffix
 }
 
-if [ "$1" == "dev" ]; then
-    echo "🛠️  Running DEV build for local OS only..."
-    # Detect local OS and Arch
-    LOCAL_OS=$(go env GOOS)
-    LOCAL_ARCH=$(go env GOARCH)
-    
-    # Use CGO=1 for local dev so the 'Doctor' can talk to local libs
-    build_bin $LOCAL_OS $LOCAL_ARCH "" 1
-else
-    echo "🚀 Running FULL release build..."
-    # Mac (ARM & Intel) - CGO enabled for SSL Doctor
-    build_bin darwin arm64 "-mac-arm64" 1
-    build_bin darwin amd64 "-mac-x64" 1
-    
-    # Windows
-    build_bin windows amd64 ".exe" 0
-    
-    # Linux - CGO disabled for maximum portability/static linking
-    build_bin linux amd64 "-linux-x64" 0
-fi
+# Convert input to lowercase for easier matching
+TARGET=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+
+case "$TARGET" in
+    linux|l)
+        echo "🐧 Targeting Linux..."
+        build_bin linux amd64 "-linux-x64" 0
+        ;;
+    windows|w)
+        echo "🪟 Targeting Windows..."
+        build_bin windows amd64 ".exe" 0
+        ;;
+    mac|m)
+        echo "🍎 Targeting Mac (Dual Build)..."
+        build_bin darwin arm64 "-mac-arm64" 1
+        build_bin darwin amd64 "-mac-x64" 1
+        ;;
+    dev)
+        echo "🛠️  Running DEV build for local OS only..."
+        build_bin $(go env GOOS) $(go env GOARCH) "" 1
+        ;;
+    *)
+        echo "🚀 Running FULL release build..."
+        build_bin darwin arm64 "-mac-arm64" 1
+        build_bin darwin amd64 "-mac-x64" 1
+        build_bin windows amd64 ".exe" 0
+        build_bin linux amd64 "-linux-x64" 0
+        ;;
+esac
 
 rm qi.q
 echo "✅ Done!"
