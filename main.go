@@ -22,62 +22,61 @@ const (
 type QiConfig struct {
 	QHome   string
 	UseTask bool
-	Cores   string // e.g., "0,1" for Linux, "3" (hex/mask) for Windows
+	Cores   string
 }
 
 func main() {
-	// Heartbeat
 	fmt.Printf("--- Qi CLI (OS: %s, Arch: %s) ---\n", runtime.GOOS, runtime.GOARCH)
 
-	// 1. Resolve Configuration and QPath
+	// 1. Resolve Configuration
 	conf := resolveConfig()
-	qPath := getExecutablePath(conf.QHome)
+	
+	// 2. Locate the best 'q' executable
+	qPath, err := findQExecutable(conf.QHome)
+	if err != nil {
+		fmt.Printf("❌ %v\n", err)
+		fmt.Println("💡 Try running 'qi' again to re-configure.")
+		os.Remove(filepath.Join(getConfigPath(), configFileName)) // Clear bad config
+		os.Exit(1)
+	}
 
-	// 2. Check for OpenSSL (Mac only)
+	// 3. Mac-specific OpenSSL Check
 	var sslPath string
 	if runtime.GOOS == "darwin" {
 		sslPath = ensureOpenSSL()
 	}
 
-	// 3. Create the bootstrap file
+	// 4. Create bootstrap file in a temporary location
 	bootstrapPath := filepath.Join(os.TempDir(), "qi.bootstrap.q")
-	err := os.WriteFile(bootstrapPath, qibootstrap, 0755)
-	if err != nil {
+	if err := os.WriteFile(bootstrapPath, qibootstrap, 0755); err != nil {
 		fmt.Printf("❌ Failed to write bootstrap: %v\n", err)
 		os.Exit(1)
 	}
 	defer os.Remove(bootstrapPath)
 
-	// 4. Build execution command based on OS Affinity tools
+	// 5. Build execution command with Affinity logic
 	qArgs := append([]string{bootstrapPath}, os.Args[1:]...)
 	var cmd *exec.Cmd
 
 	if conf.UseTask {
 		switch runtime.GOOS {
 		case "linux":
-			// taskset -c 0,1 /path/to/q ...
 			taskArgs := append([]string{"-c", conf.Cores, qPath}, qArgs...)
 			cmd = exec.Command("taskset", taskArgs...)
 			fmt.Printf("⚙️  Affinity: taskset -c %s\n", conf.Cores)
-
 		case "windows":
-			// Windows affinity uses a hex bitmask. 
-			// start /b /affinity <Mask> /wait <Path> <Args>
-			// We wrap in cmd /c to access 'start'
 			winArgs := []string{"/c", "start", "/b", "/affinity", conf.Cores, "/wait", qPath}
 			winArgs = append(winArgs, qArgs...)
 			cmd = exec.Command("cmd", winArgs...)
 			fmt.Printf("⚙️  Affinity: Windows mask 0x%s\n", conf.Cores)
-
 		default:
-			// macOS/Others: No native CLI affinity tool
 			cmd = exec.Command(qPath, qArgs...)
 		}
 	} else {
 		cmd = exec.Command(qPath, qArgs...)
 	}
 
-	// 5. Environment Setup
+	// 6. Setup Environment
 	env := os.Environ()
 	if sslPath != "" {
 		env = append(env, "DYLD_LIBRARY_PATH="+sslPath)
@@ -91,17 +90,49 @@ func main() {
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
 
-	// 6. Run
+	// 7. Execute
 	if err := cmd.Run(); err != nil {
-		fmt.Printf("\n❌ Process exited: %v\n", err)
+		fmt.Printf("\n❌ kdb+ exited: %v\n", err)
 	}
 }
 
 // --- Logic Helpers ---
 
-func resolveConfig() QiConfig {
+func findQExecutable(qhome string) (string, error) {
+	ext := ""
+	if runtime.GOOS == "windows" {
+		ext = ".exe"
+	}
+
+	// 1. Check for /bin/q first
+	binPath := filepath.Join(qhome, "bin", "q"+ext)
+	if _, err := os.Stat(binPath); err == nil {
+		return binPath, nil
+	}
+
+	// 2. Fallback to arch-specific folders
+	var sub string
+	switch runtime.GOOS {
+	case "linux": sub = "l64"
+	case "darwin": sub = "m64"
+	case "windows": sub = "w64"
+	}
+	
+	archPath := filepath.Join(qhome, sub, "q"+ext)
+	if _, err := os.Stat(archPath); err == nil {
+		return archPath, nil
+	}
+
+	return "", fmt.Errorf("could not find 'q%s' in %s/bin or %s/%s", ext, qhome, qhome, sub)
+}
+
+func getConfigPath() string {
 	home, _ := os.UserHomeDir()
-	dirPath := filepath.Join(home, configDir)
+	return filepath.Join(home, configDir)
+}
+
+func resolveConfig() QiConfig {
+	dirPath := getConfigPath()
 	filePath := filepath.Join(dirPath, configFileName)
 
 	_ = os.MkdirAll(dirPath, 0755)
@@ -124,8 +155,7 @@ func runWizard(configPath string) QiConfig {
 	reader := bufio.NewReader(os.Stdin)
 	fmt.Println("🧙 Qi Setup Wizard")
 
-	// 1. QHOME
-	fmt.Print("📂 Enter QHOME (folder containing kc.lic): ")
+	fmt.Print("📂 Enter QHOME path: ")
 	qhome, _ := reader.ReadString('\n')
 	qhome = strings.TrimSpace(qhome)
 	if strings.HasPrefix(qhome, "~") {
@@ -133,25 +163,23 @@ func runWizard(configPath string) QiConfig {
 		qhome = filepath.Join(h, qhome[1:])
 	}
 
-	// 2. Affinity
 	useTask := false
-	cores := "1" // Default for bitmask or list
+	cores := "1"
 	if runtime.GOOS == "linux" || runtime.GOOS == "windows" {
-		fmt.Printf("⚙️  Apply CPU affinity? (Avoids kdb+ license core errors) (y/n): ")
+		fmt.Printf("⚙️  Apply CPU affinity? (y/n): ")
 		ans, _ := reader.ReadString('\n')
 		if strings.ToLower(strings.TrimSpace(ans)) == "y" {
 			useTask = true
-			if runtime.GOOS == "linux" {
-				fmt.Print("🔢 Linux Cores (e.g. 0,1): ")
-			} else {
-				fmt.Print("🔢 Windows Affinity Mask (Hex, e.g. 3 for cores 0&1): ")
+			label := "🔢 Core List (e.g., 0,1): "
+			if runtime.GOOS == "windows" {
+				label = "🔢 Affinity Mask (Hex, e.g., 3): "
 			}
+			fmt.Print(label)
 			cores, _ = reader.ReadString('\n')
 			cores = strings.TrimSpace(cores)
 		}
 	}
 
-	// 3. Save
 	content := fmt.Sprintf("%s\n%t\n%s", qhome, useTask, cores)
 	_ = os.WriteFile(configPath, []byte(content), 0644)
 	fmt.Printf("✅ Config saved to %s\n", configPath)
@@ -159,20 +187,7 @@ func runWizard(configPath string) QiConfig {
 	return QiConfig{QHome: qhome, UseTask: useTask, Cores: cores}
 }
 
-func getExecutablePath(qhome string) string {
-	var sub string
-	switch runtime.GOOS {
-	case "linux": sub = "l64"
-	case "darwin": sub = "m64"
-	case "windows": sub = "w64"
-	}
-	ext := ""
-	if runtime.GOOS == "windows" { ext = ".exe" }
-	
-	return filepath.Join(qhome, sub, "q"+ext)
-}
-
 func ensureOpenSSL() string {
-	// (Your previous Mac OpenSSL detection logic)
+	// (Your previous OpenSSL detection logic)
 	return ""
 }
