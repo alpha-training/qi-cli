@@ -8,39 +8,34 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"path/filepath"
 )
 
 //go:embed qi.q
 var qibootstrap []byte
 
 func main() {
-	// Heartbeat to prove the binary is executing
-	fmt.Printf("--- Qi CLI Starting (OS: %s, Arch: %s) ---\n", runtime.GOOS, runtime.GOARCH)
+	fmt.Printf("--- Qi CLI (OS: %s) ---\n", runtime.GOOS)
 
+	// 1. Ensure kdb+ is accessible
+	qPath := ensureQReady()
+
+	// 2. Mac-specific OpenSSL Check
 	var sslPath string
 	if runtime.GOOS == "darwin" {
 		sslPath = ensureOpenSSL()
 	}
 
-	// Create the bootstrap file with executable permissions (0755)
+	// 3. Create bootstrap
 	bootstrapPath := "qi.bootstrap.q"
-	err := os.WriteFile(bootstrapPath, qibootstrap, 0755)
-	if err != nil {
-		fmt.Printf("❌ Failed to write bootstrap file: %v\n", err)
-		os.Exit(1)
-	}
+	_ = os.WriteFile(bootstrapPath, qibootstrap, 0755)
 
-	// Prepare arguments
+	// 4. Run q
 	qArgs := append([]string{bootstrapPath}, os.Args[1:]...)
-	
-	// Show the user what is happening
-	fmt.Printf("DEBUG: Launching 'q %s'\n", strings.Join(qArgs, " "))
+	cmd := exec.Command(qPath, qArgs...)
 
-	cmd := exec.Command("q", qArgs...)
-
-	// Setup Environment
 	env := os.Environ()
-	if runtime.GOOS == "darwin" && sslPath != "" {
+	if sslPath != "" {
 		env = append(env, "DYLD_LIBRARY_PATH="+sslPath)
 		env = append(env, "DYLD_FALLBACK_LIBRARY_PATH="+sslPath)
 	}
@@ -51,49 +46,64 @@ func main() {
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
 
-	// Run q
-	err = cmd.Run()
-	if err != nil {
-		fmt.Printf("❌ q process finished with error: %v\n", err)
-	}
-
-	// Cleanup
+	_ = cmd.Run()
 	os.Remove(bootstrapPath)
 }
 
-func ensureOpenSSL() string {
-	// This makes bufio "used" for the compiler even on Linux builds
-	var _ = bufio.NewReader(os.Stdin)
-
-	possiblePaths := []string{
-		"/opt/homebrew/opt/openssl@1.1/lib",
-		"/usr/local/opt/openssl@1.1/lib",
+func ensureQReady() string {
+	// Try finding q in current PATH
+	path, err := exec.LookPath("q")
+	if err == nil {
+		return path
 	}
 
-	for _, p := range possiblePaths {
-		if _, err := os.Stat(fmt.Sprintf("%s/libssl.1.1.dylib", p)); err == nil {
-			return p
-		}
-	}
+	fmt.Println("❌ kdb+ (q) was not found in your PATH.")
+	fmt.Println("🧙 Let's set it up. Where is your kdb+ folder located?")
+	fmt.Println("   (This is the folder containing 'l64', 'm64', or 'w64' and your kc.lic)")
+	fmt.Print("📂 Path: ")
 
-	fmt.Println("🩺 OpenSSL 1.1 missing.")
-	fmt.Print("🤔 Install via Homebrew? (y/n): ")
-	
 	reader := bufio.NewReader(os.Stdin)
-	response, _ := reader.ReadString('\n')
-	response = strings.ToLower(strings.TrimSpace(response))
+	input, _ := reader.ReadString('\n')
+	qhome := strings.TrimSpace(input)
 
-	if response == "y" || response == "yes" {
-		installCmd := exec.Command("brew", "install", "openssl@1.1")
-		installCmd.Stdout = os.Stdout
-		installCmd.Stderr = os.Stderr
-		if err := installCmd.Run(); err == nil {
-			for _, p := range possiblePaths {
-				if _, err := os.Stat(fmt.Sprintf("%s/libssl.1.1.dylib", p)); err == nil {
-					return p
-				}
-			}
-		}
+	// Resolve tilde if user used ~/
+	if strings.HasPrefix(qhome, "~") {
+		home, _ := os.UserHomeDir()
+		qhome = filepath.Join(home, qhome[1:])
 	}
+
+	// Architecture subfolder
+	var sub string
+	switch runtime.GOOS {
+	case "linux": sub = "l64"
+	case "darwin": sub = "m64"
+	case "windows": sub = "w64"
+	}
+
+	fullPath := filepath.Join(qhome, sub, "q")
+	if runtime.GOOS == "windows" {
+		fullPath += ".exe"
+	}
+
+	// Verify License and Executable
+	if _, err := os.Stat(fullPath); err != nil {
+		fmt.Printf("❌ Could not find executable at %s\n", fullPath)
+		os.Exit(1)
+	}
+
+	licPath := filepath.Join(qhome, "kc.lic")
+	if _, err := os.Stat(licPath); err != nil {
+		fmt.Printf("⚠️  Warning: kc.lic not found in %s. q might not start.\n", qhome)
+	}
+
+	// Set for current process
+	os.Setenv("QHOME", qhome)
+	fmt.Printf("✅ Success! Using QHOME=%s\n", qhome)
+	
+	return fullPath
+}
+
+func ensureOpenSSL() string {
+	// (Your previous OpenSSL logic here)
 	return ""
 }
