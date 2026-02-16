@@ -28,28 +28,26 @@ type QiConfig struct {
 func main() {
 	fmt.Printf("--- Qi CLI (OS: %s, Arch: %s) ---\n", runtime.GOOS, runtime.GOARCH)
 
-	// 1. Resolve Configuration (Env -> Config -> Wizard)
 	conf := resolveConfig()
 	
-	// 2. Locate binary
+	// Resolve tilde for QHome before we try to find the executable
+	conf.QHome = expandHome(conf.QHome)
+
 	qPath, err := findQExecutable(conf.QHome)
 	if err != nil {
 		fmt.Printf("❌ %v\n", err)
 		os.Exit(1)
 	}
 
-	// 3. Mac-specific OpenSSL
 	var sslPath string
 	if runtime.GOOS == "darwin" {
 		sslPath = "/usr/local/opt/openssl@1.1/lib" 
 	}
 
-	// 4. Temporary Bootstrap
 	bootstrapPath := filepath.Join(os.TempDir(), "qi.bootstrap.q")
 	_ = os.WriteFile(bootstrapPath, qibootstrap, 0755)
 	defer os.Remove(bootstrapPath)
 
-	// 5. Build Command
 	qArgs := append([]string{bootstrapPath}, os.Args[1:]...)
 	var cmd *exec.Cmd
 
@@ -60,7 +58,6 @@ func main() {
 		} else if runtime.GOOS == "windows" {
 			winArgs := append([]string{"/c", "start", "/b", "/affinity", conf.Cores, "/wait", qPath}, qArgs...)
 			cmd = exec.Command("cmd", winArgs...)
-			fmt.Printf("⚙️  Affinity: Windows mask 0x%s\n", conf.Cores)
 		} else {
 			cmd = exec.Command(qPath, qArgs...)
 		}
@@ -68,7 +65,6 @@ func main() {
 		cmd = exec.Command(qPath, qArgs...)
 	}
 
-	// 6. Env & Run
 	env := os.Environ()
 	if sslPath != "" { env = append(env, "DYLD_LIBRARY_PATH="+sslPath) }
 	env = append(env, "QHOME="+conf.QHome)
@@ -80,16 +76,24 @@ func main() {
 	}
 }
 
-// --- Hierarchy of Truth ---
+// expandHome replaces ~ at the start of a path with the user's home directory
+func expandHome(path string) string {
+	if strings.HasPrefix(path, "~") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return path
+		}
+		return filepath.Join(home, path[1:])
+	}
+	return path
+}
 
 func resolveConfig() QiConfig {
-	// A. Check Environment Variable (Highest Priority)
 	if envQHome := os.Getenv("QHOME"); envQHome != "" {
 		fmt.Printf("🌱 Using QHOME from environment: %s\n", envQHome)
 		return QiConfig{QHome: envQHome, UseTask: false, Cores: "0,1"}
 	}
 
-	// B. Check Config File
 	dirPath := filepath.Join(os.Getenv("HOME"), configDir)
 	if runtime.GOOS == "windows" {
 		dirPath = filepath.Join(os.Getenv("USERPROFILE"), configDir)
@@ -101,7 +105,6 @@ func resolveConfig() QiConfig {
 		return parseConfigFile(string(data))
 	}
 
-	// C. Wizard (Fallback)
 	return runWizard(filePath)
 }
 
@@ -146,7 +149,7 @@ func findQExecutable(qhome string) (string, error) {
 func runWizard(configPath string) QiConfig {
 	reader := bufio.NewReader(os.Stdin)
 	fmt.Println("🧙 Qi Setup Wizard")
-	fmt.Print("📂 Enter QHOME path (which contains kc.lic): ")
+	fmt.Print("📂 Enter QHOME path (e.g. ~/q): ")
 	qhome, _ := reader.ReadString('\n')
 	qhome = strings.TrimSpace(qhome)
 
@@ -157,11 +160,7 @@ func runWizard(configPath string) QiConfig {
 		ans, _ := reader.ReadString('\n')
 		if strings.ToLower(strings.TrimSpace(ans)) == "y" {
 			useTask = true
-			label := "🔢 Core List (e.g. 2,3): "
-			if runtime.GOOS == "windows" {
-				label = "🔢 Affinity Mask (Hex, e.g. 3): "
-			}
-			fmt.Print(label)
+			fmt.Print("🔢 Cores/Mask: ")
 			cores, _ = reader.ReadString('\n')
 			cores = strings.TrimSpace(cores)
 		}
