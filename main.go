@@ -149,7 +149,7 @@ func findQExecutable(qhome string) (string, error) {
 func runWizard(configPath string) QiConfig {
 	reader := bufio.NewReader(os.Stdin)
 	fmt.Println("🧙 Qi Setup Wizard")
-	fmt.Print("📂 Enter QHOME path (e.g. ~/q): ")
+	fmt.Print("📂 Enter QHOME path (where kc.lic is located): ")
 	qhome, _ := reader.ReadString('\n')
 	qhome = strings.TrimSpace(qhome)
 
