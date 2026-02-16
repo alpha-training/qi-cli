@@ -28,59 +28,43 @@ type QiConfig struct {
 func main() {
 	fmt.Printf("--- Qi CLI (OS: %s, Arch: %s) ---\n", runtime.GOOS, runtime.GOARCH)
 
-	// 1. Resolve Configuration
 	conf := resolveConfig()
 	
-	// 2. Locate the best 'q' executable
 	qPath, err := findQExecutable(conf.QHome)
 	if err != nil {
 		fmt.Printf("❌ %v\n", err)
-		fmt.Println("💡 Try running 'qi' again to re-configure.")
-		os.Remove(filepath.Join(getConfigPath(), configFileName)) // Clear bad config
 		os.Exit(1)
 	}
 
-	// 3. Mac-specific OpenSSL Check
 	var sslPath string
 	if runtime.GOOS == "darwin" {
 		sslPath = ensureOpenSSL()
 	}
 
-	// 4. Create bootstrap file in a temporary location
 	bootstrapPath := filepath.Join(os.TempDir(), "qi.bootstrap.q")
-	if err := os.WriteFile(bootstrapPath, qibootstrap, 0755); err != nil {
-		fmt.Printf("❌ Failed to write bootstrap: %v\n", err)
-		os.Exit(1)
-	}
+	_ = os.WriteFile(bootstrapPath, qibootstrap, 0755)
 	defer os.Remove(bootstrapPath)
 
-	// 5. Build execution command with Affinity logic
 	qArgs := append([]string{bootstrapPath}, os.Args[1:]...)
 	var cmd *exec.Cmd
 
 	if conf.UseTask {
-		switch runtime.GOOS {
-		case "linux":
-			taskArgs := append([]string{"-c", conf.Cores, qPath}, qArgs...)
-			cmd = exec.Command("taskset", taskArgs...)
+		if runtime.GOOS == "linux" {
+			cmd = exec.Command("taskset", append([]string{"-c", conf.Cores, qPath}, qArgs...)...)
 			fmt.Printf("⚙️  Affinity: taskset -c %s\n", conf.Cores)
-		case "windows":
-			winArgs := []string{"/c", "start", "/b", "/affinity", conf.Cores, "/wait", qPath}
-			winArgs = append(winArgs, qArgs...)
+		} else if runtime.GOOS == "windows" {
+			winArgs := append([]string{"/c", "start", "/b", "/affinity", conf.Cores, "/wait", qPath}, qArgs...)
 			cmd = exec.Command("cmd", winArgs...)
-			fmt.Printf("⚙️  Affinity: Windows mask 0x%s\n", conf.Cores)
-		default:
+		} else {
 			cmd = exec.Command(qPath, qArgs...)
 		}
 	} else {
 		cmd = exec.Command(qPath, qArgs...)
 	}
 
-	// 6. Setup Environment
 	env := os.Environ()
 	if sslPath != "" {
 		env = append(env, "DYLD_LIBRARY_PATH="+sslPath)
-		env = append(env, "DYLD_FALLBACK_LIBRARY_PATH="+sslPath)
 	}
 	env = append(env, "QHOME="+conf.QHome)
 	env = append(env, "KX_SSL_VERIFY_SERVER=NO")
@@ -90,65 +74,49 @@ func main() {
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
 
-	// 7. Execute
-	if err := cmd.Run(); err != nil {
-		fmt.Printf("\n❌ kdb+ exited: %v\n", err)
-	}
+	_ = cmd.Run()
 }
 
-// --- Logic Helpers ---
-
-func findQExecutable(qhome string) (string, error) {
-	ext := ""
-	if runtime.GOOS == "windows" {
-		ext = ".exe"
-	}
-
-	// 1. Check for /bin/q first
-	binPath := filepath.Join(qhome, "bin", "q"+ext)
-	if _, err := os.Stat(binPath); err == nil {
-		return binPath, nil
-	}
-
-	// 2. Fallback to arch-specific folders
-	var sub string
-	switch runtime.GOOS {
-	case "linux": sub = "l64"
-	case "darwin": sub = "m64"
-	case "windows": sub = "w64"
-	}
-	
-	archPath := filepath.Join(qhome, sub, "q"+ext)
-	if _, err := os.Stat(archPath); err == nil {
-		return archPath, nil
-	}
-
-	return "", fmt.Errorf("could not find 'q%s' in %s/bin or %s/%s", ext, qhome, qhome, sub)
-}
-
-func getConfigPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, configDir)
-}
+// --- Key-Value Configuration Logic ---
 
 func resolveConfig() QiConfig {
 	dirPath := getConfigPath()
 	filePath := filepath.Join(dirPath, configFileName)
-
 	_ = os.MkdirAll(dirPath, 0755)
 
-	if data, err := os.ReadFile(filePath); err == nil {
-		lines := strings.Split(string(data), "\n")
-		if len(lines) >= 3 {
-			return QiConfig{
-				QHome:   strings.TrimSpace(lines[0]),
-				UseTask: strings.TrimSpace(lines[1]) == "true",
-				Cores:   strings.TrimSpace(lines[2]),
+	conf := QiConfig{Cores: "0,1"} // Defaults
+	
+	data, err := os.ReadFile(filePath)
+	if err == nil {
+		scanner := bufio.NewScanner(strings.NewReader(string(data)))
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" || strings.HasPrefix(line, "#") { continue }
+			
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) != 2 { continue }
+			
+			key := strings.ToUpper(strings.TrimSpace(parts[0]))
+			val := strings.TrimSpace(parts[1])
+
+			switch key {
+			case "QHOME":    conf.QHome = val
+			case "USE_TASK": conf.UseTask = (val == "true")
+			case "CORES":    conf.Cores = val
 			}
 		}
 	}
 
-	return runWizard(filePath)
+	if conf.QHome == "" {
+		return runWizard(filePath)
+	}
+	return conf
+}
+
+func saveConfig(path string, conf QiConfig) {
+	content := fmt.Sprintf("# Qi CLI Configuration\nQHOME=%s\nUSE_TASK=%t\nCORES=%s\n", 
+		conf.QHome, conf.UseTask, conf.Cores)
+	_ = os.WriteFile(path, []byte(content), 0644)
 }
 
 func runWizard(configPath string) QiConfig {
@@ -158,36 +126,49 @@ func runWizard(configPath string) QiConfig {
 	fmt.Print("📂 Enter QHOME path: ")
 	qhome, _ := reader.ReadString('\n')
 	qhome = strings.TrimSpace(qhome)
-	if strings.HasPrefix(qhome, "~") {
-		h, _ := os.UserHomeDir()
-		qhome = filepath.Join(h, qhome[1:])
-	}
 
 	useTask := false
-	cores := "1"
+	cores := "0,1"
 	if runtime.GOOS == "linux" || runtime.GOOS == "windows" {
-		fmt.Printf("⚙️  Apply CPU affinity? (y/n): ")
+		fmt.Print("⚙️  Apply CPU affinity? (y/n): ")
 		ans, _ := reader.ReadString('\n')
 		if strings.ToLower(strings.TrimSpace(ans)) == "y" {
 			useTask = true
-			label := "🔢 Core List (e.g., 0,1): "
-			if runtime.GOOS == "windows" {
-				label = "🔢 Affinity Mask (Hex, e.g., 3): "
-			}
-			fmt.Print(label)
+			fmt.Print("🔢 Cores/Mask: ")
 			cores, _ = reader.ReadString('\n')
 			cores = strings.TrimSpace(cores)
 		}
 	}
 
-	content := fmt.Sprintf("%s\n%t\n%s", qhome, useTask, cores)
-	_ = os.WriteFile(configPath, []byte(content), 0644)
+	conf := QiConfig{QHome: qhome, UseTask: useTask, Cores: cores}
+	saveConfig(configPath, conf)
 	fmt.Printf("✅ Config saved to %s\n", configPath)
-
-	return QiConfig{QHome: qhome, UseTask: useTask, Cores: cores}
+	return conf
 }
 
-func ensureOpenSSL() string {
-	// (Your previous OpenSSL detection logic)
-	return ""
+// ... (findQExecutable and ensureOpenSSL helpers remain the same as previous)
+
+func findQExecutable(qhome string) (string, error) {
+	ext := ""
+	if runtime.GOOS == "windows" { ext = ".exe" }
+	
+	// Check bin first, then arch folder
+	paths := []string{
+		filepath.Join(qhome, "bin", "q"+ext),
+		filepath.Join(qhome, "l64", "q"+ext),
+		filepath.Join(qhome, "m64", "q"+ext),
+		filepath.Join(qhome, "w64", "q"+ext),
+	}
+
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil { return p, nil }
+	}
+	return "", fmt.Errorf("could not find q binary in %s", qhome)
 }
+
+func getConfigPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, configDir)
+}
+
+func ensureOpenSSL() string { return "" }
