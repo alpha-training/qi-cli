@@ -160,7 +160,7 @@ func runWizard(configPath string) QiConfig {
 		ans, _ := reader.ReadString('\n')
 		if strings.ToLower(strings.TrimSpace(ans)) == "y" {
 			useTask = true
-			fmt.Print("🔢 Cores/Mask: ")
+			fmt.Print("🔢 Cores/Mask (e.g. 0,1): ")
 			cores, _ = reader.ReadString('\n')
 			cores = strings.TrimSpace(cores)
 		}
