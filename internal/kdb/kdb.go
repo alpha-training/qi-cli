@@ -87,16 +87,33 @@ func RunWizard(configPath string) Config {
 	qhome, _ := reader.ReadString('\n')
 	qhome = strings.TrimSpace(qhome)
 
-	// 1. Validate before saving
+	// 1. Validate path immediately
 	if _, err := FindExecutable(ExpandHome(qhome)); err != nil {
 		fmt.Printf("❌ Invalid path: %v\n", err)
-		os.Exit(1) // Stop here so we don't save a broken config
+		os.Exit(1)
 	}
 
-	// 2. Only runs if FindExecutable succeeded
-	conf := Config{QHome: qhome, UseTask: false, Cores: "0,1"}
+	useTask := false
+	cores := "0,1"
+
+	// 2. Only ask affinity on supported OSs
+	if runtime.GOOS == "linux" || runtime.GOOS == "windows" {
+		fmt.Print("⚙️  Apply CPU affinity? (y/n): ")
+		ans, _ := reader.ReadString('\n')
+		if strings.ToLower(strings.TrimSpace(ans)) == "y" {
+			useTask = true
+			fmt.Print("🔢 Cores/Mask (e.g. 0,1): ")
+			cores, _ = reader.ReadString('\n')
+			cores = strings.TrimSpace(cores)
+		}
+	}
+
+	// 3. Save validated config
+	conf := Config{QHome: qhome, UseTask: useTask, Cores: cores}
 	_ = os.MkdirAll(filepath.Dir(configPath), 0755)
-	_ = os.WriteFile(configPath, []byte(fmt.Sprintf("QHOME=%s\nUSE_TASK=false\nCORES=0,1\n", qhome)), 0644)
+	content := fmt.Sprintf("QHOME=%s\nUSE_TASK=%t\nCORES=%s\n", qhome, useTask, cores)
+	_ = os.WriteFile(configPath, []byte(content), 0644)
 	
+	fmt.Printf("✅ Config saved to %s\n", configPath)
 	return conf
 }
