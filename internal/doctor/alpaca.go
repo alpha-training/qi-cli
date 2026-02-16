@@ -1,61 +1,59 @@
 package doctor
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 )
 
-func init() {
-	Register("alpaca", checkAlpaca)
-}
-
-func checkAlpaca() error {
-	fmt.Println("🩺 Checking Alpaca dependencies...")
-
-	// 1. OS-Specific OpenSSL Check
+func CheckAlpaca() error {
 	if runtime.GOOS == "darwin" {
 		return checkMacSSL()
 	} else if runtime.GOOS == "windows" {
 		return checkWindowsSSL()
 	}
-	
 	return nil
 }
 
 func checkMacSSL() error {
-	path := "/opt/homebrew/opt/openssl@1.1/lib/libssl.1.1.dylib"
-	_, err := os.Stat(path)
-	
-	if os.IsNotExist(err) {
+	// Check both Homebrew locations (Intel and ARM)
+	paths := []string{
+		"/usr/local/opt/openssl@1.1/lib/libssl.1.1.dylib",
+		"/opt/homebrew/opt/openssl@1.1/lib/libssl.1.1.dylib",
+	}
+
+	found := false
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			found = true
+			break
+		}
+	}
+
+	if !found {
 		fmt.Println("⚠️  OpenSSL 1.1 not found (required for kdb+ on macOS).")
+		fmt.Print("🤔 Would you like to install it via Homebrew? (y/n): ")
 		
-		if AskConfirm("Would you like to install it via Homebrew?") {
-			fmt.Println("Installing openssl@1.1...")
+		reader := bufio.NewReader(os.Stdin)
+		input, _ := reader.ReadString('\n')
+		if strings.ToLower(strings.TrimSpace(input)) == "y" {
 			cmd := exec.Command("brew", "install", "openssl@1.1")
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
+			cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 			return cmd.Run()
 		}
-		return fmt.Errorf("OpenSSL 1.1 is required to continue")
+		return fmt.Errorf("OpenSSL 1.1 is missing")
 	}
-	
-	fmt.Println("✅ OpenSSL 1.1 found at " + path)
 	return nil
 }
 
 func checkWindowsSSL() error {
-	// Standard Windows path for OpenSSL 1.1 Light
-	defaultPath := `C:\Program Files\OpenSSL-Win64\bin`
-	fmt.Printf("🔍 Checking for OpenSSL in %s...\n", defaultPath)
-	
-	if _, err := os.Stat(defaultPath); os.IsNotExist(err) {
-		fmt.Println("⚠️  OpenSSL 1.1 not found in default location.")
-		if AskConfirm("Would you like to open the OpenSSL download page?") {
-			// Open browser to ShiningLight or similar
-			return exec.Command("rundll32", "url.dll,FileProtocolHandler", "https://slproweb.com/products/Win32OpenSSL.html").Run()
-		}
+	path := `C:\Program Files\OpenSSL-Win64\bin`
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		fmt.Println("⚠️  OpenSSL 1.1 not found.")
+		fmt.Println("👉 Download from: https://slproweb.com/products/Win32OpenSSL.html")
 	}
 	return nil
 }
