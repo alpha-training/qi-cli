@@ -17,7 +17,7 @@ type Config struct {
 
 const (
 	ConfigDir      = ".qi"
-	ConfigFileName = "config"
+	ConfigFileName = ".qi.conf"
 )
 
 func ResolveConfig() Config {
@@ -87,7 +87,6 @@ func RunWizard(configPath string) Config {
 	qhome, _ := reader.ReadString('\n')
 	qhome = strings.TrimSpace(qhome)
 
-	// 1. Validate path immediately
 	if _, err := FindExecutable(ExpandHome(qhome)); err != nil {
 		fmt.Printf("❌ Invalid path: %v\n", err)
 		os.Exit(1)
@@ -95,8 +94,6 @@ func RunWizard(configPath string) Config {
 
 	useTask := false
 	cores := "0,1"
-
-	// 2. Only ask affinity on supported OSs
 	if runtime.GOOS == "linux" || runtime.GOOS == "windows" {
 		fmt.Print("⚙️  Apply CPU affinity? (y/n): ")
 		ans, _ := reader.ReadString('\n')
@@ -108,12 +105,35 @@ func RunWizard(configPath string) Config {
 		}
 	}
 
-	// 3. Save validated config
 	conf := Config{QHome: qhome, UseTask: useTask, Cores: cores}
-	_ = os.MkdirAll(filepath.Dir(configPath), 0755)
-	content := fmt.Sprintf("QHOME=%s\nUSE_TASK=%t\nCORES=%s\n", qhome, useTask, cores)
-	_ = os.WriteFile(configPath, []byte(content), 0644)
 	
-	fmt.Printf("✅ Config saved to %s\n", configPath)
+	// --- Preservation Logic Start ---
+	var preservedLines []string
+	if data, err := os.ReadFile(configPath); err == nil {
+		lines := strings.Split(string(data), "\n")
+		for _, line := range lines {
+			trimmed := strings.ToUpper(strings.TrimSpace(line))
+			// Only preserve lines that AREN'T the ones we manage
+			if !strings.HasPrefix(trimmed, "QHOME=") && 
+			   !strings.HasPrefix(trimmed, "USE_TASK=") && 
+			   !strings.HasPrefix(trimmed, "CORES=") &&
+			   trimmed != "" {
+				preservedLines = append(preservedLines, line)
+			}
+		}
+	}
+
+	// Build new content
+	var out strings.Builder
+	out.WriteString(fmt.Sprintf("QHOME=%s\nUSE_TASK=%t\nCORES=%s\n", qhome, useTask, cores))
+	for _, line := range preservedLines {
+		out.WriteString(line + "\n")
+	}
+	// --- Preservation Logic End ---
+
+	_ = os.MkdirAll(filepath.Dir(configPath), 0755)
+	_ = os.WriteFile(configPath, []byte(out.String()), 0644)
+	
+	fmt.Printf("✅ Config updated at %s\n", configPath)
 	return conf
 }
