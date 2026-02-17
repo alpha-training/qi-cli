@@ -10,9 +10,10 @@ import (
 )
 
 type Config struct {
-	QHome   string
-	UseTask bool
-	Cores   string
+	QHome    string
+	UseTask  bool
+	Cores    string
+	ExtraEnv map[string]string // <--- New field
 }
 
 const (
@@ -36,16 +37,21 @@ func ResolveConfig() Config {
 }
 
 func parseConfigFile(data string) Config {
-	conf := Config{Cores: "0,1"}
+	conf := Config{Cores: "0,1", ExtraEnv: make(map[string]string)}
 	scanner := bufio.NewScanner(strings.NewReader(data))
 	for scanner.Scan() {
 		parts := strings.SplitN(scanner.Text(), "=", 2)
 		if len(parts) != 2 { continue }
-		key, val := strings.ToUpper(strings.TrimSpace(parts[0])), strings.TrimSpace(parts[1])
+		key := strings.ToUpper(strings.TrimSpace(parts[0]))
+		val := strings.TrimSpace(parts[1])
+
 		switch key {
 		case "QHOME": conf.QHome = val
 		case "USE_TASK": conf.UseTask = (val == "true")
 		case "CORES": conf.Cores = val
+		default:
+			// Store anything else as an environment variable
+			conf.ExtraEnv[key] = val
 		}
 	}
 	return conf
