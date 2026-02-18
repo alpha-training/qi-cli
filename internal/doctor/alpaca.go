@@ -36,28 +36,39 @@ func HandleAlpacaSetup() error {
 
 	configPath := filepath.Join(home, ".qi", "qi.conf")
 
-	// 1. Read the existing config file
-	configData, _ := os.ReadFile(configPath)
-	configStr := string(configData)
+	// 1. Read existing file line-by-line to ignore commented-out keys
+	hasKey := false
+	hasSecret := false
+	
+	fRead, err := os.Open(configPath)
+	if err == nil {
+		scanner := bufio.NewScanner(fRead)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			// Skip comments and empty lines
+			if strings.HasPrefix(line, "#") || line == "" {
+				continue
+			}
+			if strings.Contains(line, "ALPACAKEY=") {
+				hasKey = true
+			}
+			if strings.Contains(line, "ALPACASECRET=") {
+				hasSecret = true
+			}
+		}
+		fRead.Close()
+	}
 
-	// Check what we already have
-	hasKey := strings.Contains(configStr, "ALPACAKEY=")
-	hasSecret := strings.Contains(configStr, "ALPACASECRET=")
-
-	// If both exist, we are done
+	// If both exist and are active, we are done
 	if hasKey && hasSecret {
-		// Only print if you want verbose output, otherwise keep silent for success
-		// fmt.Println("✨ ALPACAKEY and ALPACASECRET already configured.")
 		return nil
 	}
 
 	// 2. Prompt for missing items
+	fmt.Println("⚠️  Alpaca API keys missing or commented out.")
 	reader := bufio.NewReader(os.Stdin)
 	var keyToWrite, secretToWrite string
 
-	fmt.Println("⚠️  Alpaca API keys missing.")
-
-	// Prompt for Key if missing
 	if !hasKey {
 		fmt.Print("🔑 Please enter your ALPACAKEY: ")
 		input, _ := reader.ReadString('\n')
@@ -68,7 +79,6 @@ func HandleAlpacaSetup() error {
 		keyToWrite = "ALPACAKEY=" + key + "\n"
 	}
 
-	// Prompt for Secret if missing
 	if !hasSecret {
 		fmt.Print("🔐 Please enter your ALPACASECRET: ")
 		input, _ := reader.ReadString('\n')
@@ -79,31 +89,29 @@ func HandleAlpacaSetup() error {
 		secretToWrite = "ALPACASECRET=" + secret + "\n"
 	}
 
-	// 3. Open file to save
+	// 3. Open file for appending
 	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
 		return fmt.Errorf("could not create config directory: %v", err)
 	}
 
-	f, err := os.OpenFile(configPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	fAppend, err := os.OpenFile(configPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return fmt.Errorf("could not open config file: %v", err)
 	}
-	defer f.Close()
+	defer fAppend.Close()
 
-	// Ensure we start on a new line
-	if len(configStr) > 0 && !strings.HasSuffix(configStr, "\n") {
-		f.WriteString("\n")
-	}
+	// Newline safety for appending
+	fAppend.WriteString("\n")
 
 	// 4. Write the missing pieces
 	if keyToWrite != "" {
-		f.WriteString(keyToWrite)
+		fAppend.WriteString(keyToWrite)
 	}
 	if secretToWrite != "" {
-		f.WriteString(secretToWrite)
+		fAppend.WriteString(secretToWrite)
 	}
 
-	f.Sync()
+	fAppend.Sync()
 	fmt.Printf("✅ Alpaca configuration updated in %s\n", configPath)
 	return nil
 }

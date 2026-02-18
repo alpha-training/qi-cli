@@ -1,3 +1,5 @@
+main.go
+
 package main
 
 import (
@@ -7,7 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-
 	"qi-cli/internal/doctor"
 	"qi-cli/internal/kdb"
 )
@@ -34,8 +35,8 @@ func main() {
 			os.Exit(1)
 		}
 
-		// IMPORTANT: Reload config so 'conf' now contains the new keys
-		// if the user just entered them.
+// IMPORTANT: Reload config so 'conf' now contains the new keys
+// if the user just entered them.
 		conf = kdb.ResolveConfig()
 	}
 
@@ -63,7 +64,7 @@ func main() {
 		fmt.Printf("\n❌ kdb+ exited: %v\n", err)
 		// Propagate exit code if possible, essentially transparent wrapping
 		if exitError, ok := err.(*exec.ExitError); ok {
-			os.Exit(exitError.ExitCode())
+		os.Exit(exitError.ExitCode())
 		}
 		os.Exit(1)
 	}
@@ -91,8 +92,8 @@ func resolveScriptPath() string {
 // buildCommand handles OS-specific affinity wrapping
 func buildCommand(qPath string, qArgs []string, conf kdb.Config) *exec.Cmd {
 	if conf.UseTask {
-		if runtime.GOOS == "linux" {
-			// taskset -c 0-3 q ...
+	if runtime.GOOS == "linux" {
+		// taskset -c 0-3 q ...
 			return exec.Command("taskset", append([]string{"-c", conf.Cores, qPath}, qArgs...)...)
 		} else if runtime.GOOS == "windows" {
 			// start /affinity F q ...
