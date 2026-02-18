@@ -1,0 +1,53 @@
+{
+  "description": "Dev 1",
+  "base_port": 10000,
+  "processes": {
+    "tp1": {
+      "pkg": "tp",
+      "port_offset": 10,
+      "args": [
+        "-t",
+        "100"
+      ]
+    },
+    "rdb1": {
+      "pkg": "rdb",
+      "port_offset": 11,
+      "subscribe_to": {
+          "tp1": "*"
+      }
+    },
+    "wdb1": {
+      "pkg": "wdb",
+      "port_offset": 12,
+      "subscribe_to": {
+        "tp1": "*"
+      },
+      "hdb": "hdb1"
+    },
+    "hdb1": {
+      "pkg": "hdb",
+      "port_offset": 13
+    },
+    "binance1": {
+      "pkg": "binance",
+      "port_offset": 100,
+      "depends_on": ["tp1"]
+    },
+    "massive1": {
+      "pkg": "massive",
+      "port_offset": 101,
+      "depends_on": ["tp1"]
+    },
+    "alpaca1": {
+      "pkg": "alpaca",
+      "port_offset": 102,
+      "depends_on": ["tp1"]
+    },
+    "kraken1": {
+      "pkg": "kraken",
+      "port_offset": 103,
+      "depends_on": ["tp1"]
+    }
+  }
+}
