@@ -1,14 +1,17 @@
-main.go
-
 package main
 
 import (
+	"bufio"
 	_ "embed"
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
+
+	"qi-cli/internal/api"
 	"qi-cli/internal/doctor"
 	"qi-cli/internal/kdb"
 )
@@ -18,59 +21,129 @@ var embeddedQScript []byte
 
 const qScriptName = "qi.q"
 
+// AppConfig handles the hierarchy of settings
+type AppConfig struct {
+	ConnTimeout string
+	PingTimeout string
+	CertFile    string
+	KeyFile     string
+}
+
 func main() {
+	// 1. Load configuration from ~/.qi/qi.conf with OS-aware defaults
+	appConf := loadQiConfig()
+
+	// --- 2. API Mode Detection ---
+	if len(os.Args) > 1 && os.Args[1] == "api" {
+		apiCmd := flag.NewFlagSet("api", flag.ExitOnError)
+
+		hubPort := apiCmd.String("hub", "8000", "Port of the running kdb process (hub)")
+		listenPort := apiCmd.String("listen", "443", "Port for this REST API to listen on")
+
+		// Flags default to values found in qi.conf
+		certFile := apiCmd.String("cert", appConf.CertFile, "Path to SSL certificate")
+		keyFile := apiCmd.String("key", appConf.KeyFile, "Path to SSL private key")
+
+		apiCmd.Parse(os.Args[2:])
+
+		// Pre-flight check for SSL files if running on standard HTTPS port
+		if *listenPort == "443" {
+			if _, err := os.Stat(*certFile); os.IsNotExist(err) {
+				fmt.Printf("⚠️  SSL Certificate not found at %s\n", *certFile)
+				fmt.Printf("💡 Check your ~/.qi/qi.conf or use -cert flag\n")
+			}
+		}
+
+		fmt.Printf("🌐 Starting qi API Mode\n")
+		fmt.Printf("📍 Hub: %s | Listen: %s | Timeout: %sms\n", *hubPort, *listenPort, appConf.ConnTimeout)
+
+		api.Start(*hubPort, *listenPort, *certFile, *keyFile)
+		return
+	}
+
+	// --- 3. Standard qi Launcher Logic ---
 	fmt.Printf("--- qi CLI (OS: %s, Arch: %s) ---\n", runtime.GOOS, runtime.GOARCH)
 
-	// 1. Load Configuration (Hierarchy: Local > Global > Defaults)
 	conf := kdb.ResolveConfig()
 	conf.QHome = kdb.ExpandHome(conf.QHome)
 
-	// 2. Doctor Check (Alpaca Mode)
-	if len(os.Args) > 1 && os.Args[1] == "alpaca" {
-		// We run the doctor unconditionally here.
-		// It checks for SSL dependencies AND valid API keys.
-		// It is "quiet" if everything is already found.
-		if err := doctor.CheckAlpaca(); err != nil {
-			fmt.Printf("❌ Setup failed: %v\n", err)
-			os.Exit(1)
-		}
-
-// IMPORTANT: Reload config so 'conf' now contains the new keys
-// if the user just entered them.
-		conf = kdb.ResolveConfig()
-	}
-
-	// 3. Find the q binary
 	qPath, err := kdb.FindExecutable(conf.QHome)
 	if err != nil {
 		fmt.Printf("❌ %v\n", err)
 		os.Exit(1)
 	}
 
-	// 4. Resolve the q script (Local file has priority for dev)
 	bootstrapPath := resolveScriptPath()
-
-	// 5. Setup Command and Arguments
 	qArgs := append([]string{bootstrapPath}, os.Args[1:]...)
 	cmd := buildCommand(qPath, qArgs, conf)
 
-	// 6. Prepare Environment (The "Injection" Layer)
 	cmd.Env = prepareEnv(conf)
 	cmd.Dir = "."
 	cmd.Stdout, cmd.Stderr, cmd.Stdin = os.Stdout, os.Stderr, os.Stdin
 
-	// 7. Execute
 	if err := cmd.Run(); err != nil {
 		fmt.Printf("\n❌ kdb+ exited: %v\n", err)
-		// Propagate exit code if possible, essentially transparent wrapping
-		if exitError, ok := err.(*exec.ExitError); ok {
-		os.Exit(exitError.ExitCode())
-		}
-		os.Exit(1)
 	}
 }
 
-// resolveScriptPath handles the hybrid embedded/local script logic
+// loadQiConfig handles OS-specific defaults and parses ~/.qi/qi.conf
+func loadQiConfig() AppConfig {
+	home, _ := os.UserHomeDir()
+	confPath := filepath.Join(home, ".qi", "qi.conf")
+
+	// Set baseline defaults
+	config := AppConfig{
+		ConnTimeout: "1000",
+		PingTimeout: "100",
+	}
+
+	// Apply OS-specific SSL path defaults
+	switch runtime.GOOS {
+	case "windows":
+		// Standard Certbot paths for Windows
+		config.CertFile = "C:\\Certbot\\live\\api.qsharpe.com\\fullchain.pem"
+		config.KeyFile = "C:\\Certbot\\live\\api.qsharpe.com\\privkey.pem"
+	case "darwin":
+		// Typical macOS local dev or Homebrew paths
+		config.CertFile = filepath.Join(home, "Library/Application Support/qi/certs/fullchain.pem")
+		config.KeyFile = filepath.Join(home, "Library/Application Support/qi/certs/privkey.pem")
+	default:
+		// RHEL / Ubuntu / Debian standard Let's Encrypt paths
+		config.CertFile = "/etc/letsencrypt/live/api.qsharpe.com/fullchain.pem"
+		config.KeyFile = "/etc/letsencrypt/live/api.qsharpe.com/privkey.pem"
+	}
+
+	// Parse the config file if it exists
+	file, err := os.Open(confPath)
+	if err == nil {
+		defer file.Close()
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) == 2 {
+				key := strings.TrimSpace(parts[0])
+				val := strings.TrimSpace(parts[1])
+				switch key {
+				case "CONN_TIMEOUT":
+					config.ConnTimeout = val
+				case "PING_TIMEOUT":
+					config.PingTimeout = val
+				case "CERT_FILE":
+					config.CertFile = val
+				case "KEY_FILE":
+					config.KeyFile = val
+				}
+			}
+		}
+	}
+
+	return config
+}
+
 func resolveScriptPath() string {
 	localPath := filepath.Join(".", qScriptName)
 	if _, err := os.Stat(localPath); err == nil {
@@ -89,51 +162,35 @@ func resolveScriptPath() string {
 	return globalPath
 }
 
-// buildCommand handles OS-specific affinity wrapping
 func buildCommand(qPath string, qArgs []string, conf kdb.Config) *exec.Cmd {
-	if conf.UseTask {
-	if runtime.GOOS == "linux" {
-		// taskset -c 0-3 q ...
+	if conf.UseTask && (runtime.GOOS == "linux" || runtime.GOOS == "windows") {
+		if runtime.GOOS == "linux" {
 			return exec.Command("taskset", append([]string{"-c", conf.Cores, qPath}, qArgs...)...)
-		} else if runtime.GOOS == "windows" {
-			// start /affinity F q ...
-			// Note: Windows 'start' is a shell built-in, so we must invoke "cmd /c"
-			winArgs := append([]string{"/c", "start", "/b", "/affinity", conf.Cores, "/wait", qPath}, qArgs...)
-			return exec.Command("cmd", winArgs...)
 		}
+		winArgs := append([]string{"/c", "start", "/b", "/affinity", conf.Cores, "/wait", qPath}, qArgs...)
+		return exec.Command("cmd", winArgs...)
 	}
-	// Default: run q directly
 	return exec.Command(qPath, qArgs...)
 }
 
-// prepareEnv merges system env, config env, and doctor fixes
 func prepareEnv(conf kdb.Config) []string {
 	env := os.Environ()
-
-	// 1. Essential kdb+ variables
 	env = append(env, "QHOME="+conf.QHome)
 
-	// 2. Add extra variables from .qi.conf
 	for k, v := range conf.ExtraEnv {
 		env = append(env, fmt.Sprintf("%s=%s", k, v))
 	}
 
-	// 3. OS-Specific Fixes (The Doctor's input)
 	if runtime.GOOS == "darwin" {
-		// Ensure OpenSSL libraries are discoverable by kdb+
 		env = append(env, "DYLD_LIBRARY_PATH=/usr/local/opt/openssl@1.1/lib:/opt/homebrew/opt/openssl@1.1/lib")
 	}
 
-	// 4. Run Doctor-level SSL resolution for Linux (if applicable)
-	// Ensure you have implemented ResolveSSL in your doctor package,
-	// or remove this block if you only target Mac/Windows.
-	if runtime.GOOS == "linux" {
-		sslFixes := doctor.ResolveSSL(runtime.GOOS)
-		for k, v := range sslFixes {
-			if _, overridden := conf.ExtraEnv[k]; !overridden {
-				env = append(env, fmt.Sprintf("%s=%s", k, v))
-			}
+	sslFixes := doctor.ResolveSSL(runtime.GOOS)
+	for k, v := range sslFixes {
+		if _, overridden := conf.ExtraEnv[k]; !overridden {
+			env = append(env, fmt.Sprintf("%s=%s", k, v))
 		}
 	}
+
 	return env
 }

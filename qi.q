@@ -1,24 +1,27 @@
+\e 1
 \d .qi
 
 env:{$[count v:getenv x;v;y]}
 HOME:env[`HOME;env[`USERPROFILE;"."]]
 
-/ can override the below with an env variable or entry in .qi.conf
-.conf.URL:env[`QI_URL;"https://raw.githubusercontent.com/alpha-training/qi/refs/heads/main/.qi.json"]
+/ can override `.conf with an env variable or entry in ~/.qi/qi.conf or .qi/qi.conf
+.conf.URL:env[`QI_URL;"https://raw.githubusercontent.com/alpha-training/qi/refs/heads/main/.qi/index.json"]
 .conf.API:env[`QI_API;"https://api.github.com/repos/"]
 .conf.RAW:env[`QI_REPO_RAW;"https://raw.githubusercontent.com/"]
 .conf.TOKEN:env[`GITHUB_TOKEN;""]
 .conf.QBIN:env[`QBIN;first .z.X]
 .conf.QI_HOME:env[`QI_HOME;HOME,"/.qi"]
-/.conf.HUB:env[`QI_HUB;"8000"]
+.conf.QI_CMD:env[`QI_CMD;""]
 
-LOCAL:hsym`$$[WIN:.z.o like"w*";ssr[first system"cd";"\\";"/"];first system"pwd"]
+LOCAL:hsym`$$[WIN:.z.o like"w*";ssr[system"cd";"\\";"/"];first system"pwd"]
 .conf.STACKS:env[`QI_STACKS;1_string` sv LOCAL,`stacks]
 .conf.DATA:env[`QI_DATA;1_string` sv LOCAL,`data]
 .conf.LOGS:env[`QI_LOGS;1_string` sv LOCAL,`logs]
 
-/ can be overriden with qi.conf
+/ can override in ~/.qi/qi.conf or .qi/qi.conf
 .conf.AUTO_VENDOR:0
+.conf.CORES:.z.c
+.conf.FIRST_CORE:2
 
 / file system
 mv:("mv";"move")WIN:.z.o like"w*"
@@ -35,21 +38,26 @@ ext:{$[x like"*",y;x;`$tostr[x],y]}
 dotq:ext[;".q"]
 paths:{a where(last each` vs'a:(raze/){$[p~k:key p:path x;p;.z.s each` sv'p,'k where not k like".*"]}x)like tostr y}
 hostport:{`$$[":"=f:first a:tostr x;a;f in .Q.n;"::",a;":",a]}
+cp:{[src;targ] path[targ]0:read0 path src}
 
 / basic logging function
 print:{[typ;msg] -1 string[.z.p]," ",typ," ",string[.z.w]," ",$[10=abs type msg;msg;-3!msg];}
-info:print"info"
+{x set $[x=`fatal;{print[x;y];exit 1};print]string x}each`info`error`fatal;
 
 / try-catch
 tryx:{[func;args;catch] $[`ERR~first r:.[func;args;{(`ERR;x)}];(0b;catch;r 1);(1b;r;"")]}
 try:{tryx[x;enlist y;z]}    / for monadic (1 arg) functions
 
 / web & json
+online:{first .qi.try[system;"curl --connect-timeout 1 1.1.1.1";0]}
 curl:{system("curl -fsSL ",$[count tk:.conf.TOKEN;"-H \"Authorization: Bearer ",tk,"\" ";""]),x}
 jcurl:.j.k raze curl@
 fetch:{[url;p]
-  info "fetch: ",cmd:"curl -L -s -o ",ospath[p]," ",url;
+  info "fetch: ",cmd:"curl -L -s -o ",(sp:ospath p)," ",url;
   path[p]1:0#0x;
+  if[not first r:.qi.try[system;cmd;0];
+    @[hdel;p;0];
+    '$[online`;"Problem fetching ",sp,": ",r 2;"Tried to fetch ",sp, " but could not connect to the internet"],"\n"];
   system cmd;
   }
   
@@ -62,6 +70,7 @@ infer:{
   if[(t:type x)in 0 98 99h;:.z.s each x];
   if[t<>10;:x];
   if[x~enlist"*";:"*"];
+  if[x like"'*'";:1_-1_x];
   if[a~inter[a:-1_x]v:.Q.n," .:-";:get x];
   if[" "in x;:.z.s each" "vs x];
   if[x[0 10]like"[1-2]D";if[not null p:"P"$x;:p]];
@@ -72,25 +81,26 @@ parseconf:{[p]
   s@:where 1=sum each s="=";
   s:trim @[s;where"#"in's;first"#"vs];
   if[count err:select from(a:flip`k`v!("S*";"=")0:s)where 0=count each v;
-    show err;.log.fatal"Badly formed ",1_string p];
+    show err;fatal"Badly formed ",1_string p];
   (1#.q),a[`k]!infer each a`v}
 
-loadconfx:{[required;p] if[not exists cp:path p;if[required;'"loadconf - ",spath[cp]," not found"];:()];.conf,:parseconf cp;}
+loadconfx:{[required;pc] if[not exists p:path pc;if[required;'"loadconf - ",spath[p]," not found"];:()];.conf,:parseconf p;}
 loadconf:loadconfx 0b
 
 / package management
 pkgs:1#.q
-loadf:{[p] system"l ",spath p;}
+loadf:{[p]info cmd:"\\l ",spath p;get cmd;}
 
 loadpkg:{[init;p;name]
+  /info -3!(init;p;name);
   pkgs[name]:p;
-  loadconf(p;`defaults.conf);
   loadschemas name;
-  if[name in`cli;:.log.info string[name]," installed"];
+  if[name in`cli;:.qi.info string[name]," installed"];
   if[init;
+    loadconf(p;`defaults.conf);
     system"d .";
     loadf(p;dotq name);
-    if[name=`log;info::.log.info]]}
+    if[name=`log;.qi,:.conf.LOGLEVELS#.log]]}
 
 frompkg:{[pkg;f]
   if[null p:pkgs pkg;
@@ -109,37 +119,38 @@ load1schema:{[p]
   }
 
 loadschemas:{[pkg] load1schema each paths[path(pkgs pkg;`schemas);"*.csv"];}
-
-getopt:{$[(::)~o:opts x;"";infer o]}
+getopt:{$[(::)~o:opts x;"";o]}
 
 checkpackages:{
   if[not exists f:local`.qi`index.json;fetch[.conf.URL;f]];
   if[not`packages in key`.qi;packages::update sha:{""}each i from readpkgs f]}
 
+getconf:{[name;default] $[(::)~v:.conf name;default;v]}
+loadfromvendor:{[init;name] $[exists pv:local(`vendor;name);[loadpkg[init;pv;tosym name];1b];0b]}
+requireconfs:{[c] if[count m:((),c)except key .conf;'"Missing required setting(s) in .conf: ",","sv string m]}
+
 parsecmd:{[cmd]
+  if[not ishub::cmd~"hub";if[loadfromvendor[1b;cmd];:()]];
   checkpackages[];
   if[cmd~"list";
-    if[1=count .z.x;show select package:k,github_repo:`$repo from .qi.packages;exit 0]];
-  getinitf:{@[get;` sv `,x,`init;::]};
-  if[count select from (pk:0!.qi.packages)where k like cmd;
-    import cmd;
-    if[`init in key opts;getinitf[.qi.tosym cmd][]];   / TODO - ever used?
-    :()];
-  if[isproc::0<count a:select from pk where cmd like/:(string[k],'"*");
-    import pkg:first a`k;
-    .qi.import`proc;
-    .proc.init .qi.tosym cmd;
-    getinitf[pkg][]];
+    if[1=count .z.x;show select package:k,github:`$repo from .qi.packages;exit 0]];
+  if[ispkg:not[ishub]&count select from(pk:0!.qi.packages)where k like cmd;
+    import cmd];
+  if[not ispkg;
+    if[isproc::ishub|0<count a:select from pk where cmd like/:(string[k],'"*");
+      import pkg:first a`k;
+      .qi.import`proc;
+      .proc.init .qi.tosym cmd;
+      @[get;` sv `,pkg,`init;::][]]];
+  if[getconf[`AUTO_START;0b]|`start in key opts;
+      $[0~sf:@[get;`..start;0];'"No start function defined";sf[]]];
   }
-
-requireconfs:{[c] if[count m:((),c)except key .conf;'"Missing required setting(s) in .conf: ",","sv string m]}
 
 importx:{[init;x]
   if[not null pkgs name:first` vs sx:tosym x;:(::)];
+  if[null name;assert];
   if[name in key`;:(::)];
-  $[`log=tosym x;print["info"];info]"Loading ",string name;
-  if[exists pv:local`vendor,name;
-    :loadpkg[init;pv;name]];
+  if[loadfromvendor[init;name];:(::)];
   checkpackages[];
   if[exists lockf:local`.qi`index.lock.json;
     packages,:readpkgs lockf];
@@ -167,8 +178,9 @@ importx:{[init;x]
           if[not $[WIN;f like"*.exe";.z.o like"l*";f like"*linux*";f like"*",(3#first system"uname -m"),"*"];:()];
           f:first"-"vs 5_f]];
       if[not exists p:qihome(`cache;repo;sha;f);
+        dbg2;
         fetch[url;p];
-        if[isexec&not WIN;@[system;"chmod +x ",sp;{.log.error"Failed to set +x perms on ",x,": ",y}sp:spath p]]];
+        if[isexec&not WIN;@[system;"chmod +x ",sp;{error"Failed to set +x perms on ",x,": ",y}sp:spath p]]];
       }[name;repo;sha]each vfiles:exec path from treeInfo where typ like"blob"];
   if[vend:.conf.AUTO_VENDOR;
     info"Vendoring ",string[name]," to ",spath pv;
@@ -176,13 +188,9 @@ importx:{[init;x]
   loadpkg[init;$[vend;pv;dir];name]}
 
 import:importx 1b
+.qi.isproc:0b
 
 opts:(1#.q),first each .Q.opt .z.x
-isproc:any`name`proc in key opts 
-doctor:`doctor in key opts
 loadconf (.conf.QI_HOME;`qi.conf);
 loadconf local`.qi`qi.conf;
-
-.qi.importx[0b]each `$lower","vs .qi.getopt`schemas;
-.qi.isproc:0b
 {if[10=type x;.qi.parsecmd x]}first .z.x;

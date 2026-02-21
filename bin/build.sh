@@ -55,7 +55,7 @@ case "$TARGET" in
 esac
 
 # 2. Cleanup: Remove the temporary copy so it doesn't clutter your repo
-echo "🧹 Removing temporary local copy of $LOCAL_Q_FILE..."
-rm -f "$LOCAL_Q_FILE"
+# echo "🧹 Removing temporary local copy of $LOCAL_Q_FILE..."
+# rm -f "$LOCAL_Q_FILE"
 
 echo "✅ Done!"
