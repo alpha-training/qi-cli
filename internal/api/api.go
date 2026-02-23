@@ -45,8 +45,8 @@ func Start(hubPort, listenPort, certFile, keyFile string) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ping", func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "API is alive") })
 	mux.HandleFunc("/query", s.handleQuery)
-	mux.HandleFunc("/up/", s.handleProcessAction("up", ".hub.up"))
-	mux.HandleFunc("/down/", s.handleProcessAction("down", ".hub.down"))
+	mux.HandleFunc("/up/", s.handleProcessAction("up", "up"))
+	mux.HandleFunc("/down/", s.handleProcessAction("down", "down"))
 
 	// 3. Wrap with CORS Middleware
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
