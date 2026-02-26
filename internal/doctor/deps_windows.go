@@ -14,3 +14,4 @@ func ResolveWindowsPath() string {
         return "" 
     }
     return strings.TrimSpace(string(out))
+}
