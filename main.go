@@ -174,29 +174,31 @@ func buildCommand(qPath string, qArgs []string, conf kdb.Config) *exec.Cmd {
 }
 
 func prepareEnv(conf kdb.Config) []string {
-    env := os.Environ()
-    env = append(env, "QHOME="+conf.QHome)
+	// Start with a clean copy of the current environment
+	env := os.Environ()
+	
+	// Add QHOME
+	env = append(env, "QHOME="+conf.QHome)
 
-    // 1. Get SSL fixes from doctor
-    sslFixes := doctor.ResolveSSL(runtime.GOOS)
-    
-    // 2. Add Windows DLL path if on Windows
-    if runtime.GOOS == "windows" {
-        dllPath := doctor.GetDepsPath() // From your deps_windows.go
-        if dllPath != "" {
-            // Find current PATH and prepend the DLL folder
-            currentPath := os.Getenv("PATH")
-            env = append(env, "PATH="+dllPath+";"+currentPath)
-        }
-    }
+	// 1. Get SSL fixes from doctor (sets SSL_VERIFY_SERVER=NO for Windows)
+	sslFixes := doctor.ResolveSSL(runtime.GOOS)
+	for k, v := range sslFixes {
+		env = append(env, fmt.Sprintf("%s=%s", k, v))
+	}
 
-    // 3. Merge SSL fixes into the env slice
-    for k, v := range sslFixes {
-        if _, overridden := conf.ExtraEnv[k]; !overridden {
-            env = append(env, fmt.Sprintf("%s=%s", k, v))
-        }
-    }
+	// 2. Add Windows DLL path (Correctly modifying the existing PATH)
+	if runtime.GOOS == "windows" {
+		dllPath := doctor.GetDepsPath()
+		if dllPath != "" {
+			for i, e := range env {
+				if strings.HasPrefix(strings.ToUpper(e), "PATH=") {
+					// Prepend the new DLL path to the EXISTING path
+					env[i] = "PATH=" + dllPath + ";" + e[5:]
+					break
+				}
+			}
+		}
+	}
 
-    // ... existing Darwin logic ...
-    return env
+	return env
 }
