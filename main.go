@@ -174,23 +174,29 @@ func buildCommand(qPath string, qArgs []string, conf kdb.Config) *exec.Cmd {
 }
 
 func prepareEnv(conf kdb.Config) []string {
-	env := os.Environ()
-	env = append(env, "QHOME="+conf.QHome)
+    env := os.Environ()
+    env = append(env, "QHOME="+conf.QHome)
 
-	for k, v := range conf.ExtraEnv {
-		env = append(env, fmt.Sprintf("%s=%s", k, v))
-	}
+    // 1. Get SSL fixes from doctor
+    sslFixes := doctor.ResolveSSL(runtime.GOOS)
+    
+    // 2. Add Windows DLL path if on Windows
+    if runtime.GOOS == "windows" {
+        dllPath := doctor.GetDepsPath() // From your deps_windows.go
+        if dllPath != "" {
+            // Find current PATH and prepend the DLL folder
+            currentPath := os.Getenv("PATH")
+            env = append(env, "PATH="+dllPath+";"+currentPath)
+        }
+    }
 
-	if runtime.GOOS == "darwin" {
-		env = append(env, "DYLD_LIBRARY_PATH=/usr/local/opt/openssl@1.1/lib:/opt/homebrew/opt/openssl@1.1/lib")
-	}
+    // 3. Merge SSL fixes into the env slice
+    for k, v := range sslFixes {
+        if _, overridden := conf.ExtraEnv[k]; !overridden {
+            env = append(env, fmt.Sprintf("%s=%s", k, v))
+        }
+    }
 
-	sslFixes := doctor.ResolveSSL(runtime.GOOS)
-	for k, v := range sslFixes {
-		if _, overridden := conf.ExtraEnv[k]; !overridden {
-			env = append(env, fmt.Sprintf("%s=%s", k, v))
-		}
-	}
-
-	return env
+    // ... existing Darwin logic ...
+    return env
 }
