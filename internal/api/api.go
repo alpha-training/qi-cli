@@ -28,6 +28,7 @@ type ApiServer struct {
 	ListenPort string
 	conn       *websocket.Conn
 	callbacks  sync.Map // map[string]chan KdbResponse
+	subscribers sync.Map // map[chan []byte]struct{}
 	mu         sync.Mutex
 }
 
@@ -45,6 +46,7 @@ func Start(hubPort, listenPort, certFile, keyFile string) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ping", func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "API is alive") })
 	mux.HandleFunc("/query", s.handleQuery)
+	mux.HandleFunc("/stream", s.handleStream)
 	mux.HandleFunc("/up/", s.handleProcessAction("up", "up"))
 	mux.HandleFunc("/down/", s.handleProcessAction("down", "down"))
 
@@ -119,6 +121,10 @@ func (s *ApiServer) readLoop() {
 
 		var resp KdbResponse
 		if err := json.Unmarshal(message, &resp); err == nil {
+			if resp.Callback == "upd" {
+				s.broadcast(message)
+				continue
+			}
 			if ch, ok := s.callbacks.Load(resp.Callback); ok {
 				ch.(chan KdbResponse) <- resp
 			}
@@ -147,7 +153,7 @@ func (s *ApiServer) kdbQuery(cmd string) (json.RawMessage, error) {
 	select {
 	case res := <-ch:
 		if res.Error != "" {
-			return nil, fmt.Errorf(res.Error)
+			return nil, fmt.Errorf("%s", res.Error)
 		}
 		return res.Result, nil
 	case <-time.After(5 * time.Second):
@@ -163,6 +169,46 @@ func (s *ApiServer) handleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(res)
+}
+
+func (s *ApiServer) broadcast(msg []byte) {
+	s.subscribers.Range(func(key, _ any) bool {
+		ch := key.(chan []byte)
+		select {
+		case ch <- msg:
+		default:
+		}
+		return true
+	})
+}
+
+func (s *ApiServer) handleStream(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	ch := make(chan []byte, 16)
+	s.subscribers.Store(ch, struct{}{})
+	defer func() {
+		s.subscribers.Delete(ch)
+		close(ch)
+	}()
+
+	for {
+		select {
+		case msg := <-ch:
+			fmt.Fprintf(w, "data: %s\n\n", msg)
+			flusher.Flush()
+		case <-r.Context().Done():
+			return
+		}
+	}
 }
 
 func (s *ApiServer) handleProcessAction(action, kdbFunc string) http.HandlerFunc {
