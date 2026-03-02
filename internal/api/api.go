@@ -49,6 +49,8 @@ func Start(hubPort, listenPort, certFile, keyFile string) {
 	mux.HandleFunc("/stream", s.handleStream)
 	mux.HandleFunc("/up/", s.handleProcessAction("up", "up"))
 	mux.HandleFunc("/down/", s.handleProcessAction("down", "down"))
+	mux.HandleFunc("/readstack/", s.handleProcessAction("readstack", "readstack"))
+	mux.HandleFunc("/writestack/", s.handleProcessAction("writestack", "writestack"))
 
 	// 3. Wrap with CORS Middleware
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
