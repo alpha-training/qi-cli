@@ -2,60 +2,101 @@
 
 APP_NAME="qi"
 DIST_DIR="dist"
-# The real source of your q script
 SOURCE_Q_FILE="../qi/qi.q" 
-# The local filename Go expects to embed
 LOCAL_Q_FILE="./qi.q"
 
-echo "🧹 Cleaning up old artifacts..."
-rm -f "$LOCAL_Q_FILE"
+# --- Cleanup & Setup ---
+
+cleanup() {
+    if [ -f "$LOCAL_Q_FILE" ]; then
+        echo "🧹 Cleaning up temporary file..."
+        rm -f "$LOCAL_Q_FILE"
+    fi
+}
+# Trap ensures cleanup happens even if the script fails
+trap cleanup EXIT
+
+echo "🚀 Starting build process..."
 mkdir -p "$DIST_DIR"
 
-# 1. Physical Copy (Since go:embed doesn't follow symlinks)
+# Copy source for go:embed (since it doesn't follow symlinks)
 if [ -f "$SOURCE_Q_FILE" ]; then
-    echo "📄 Copying $SOURCE_Q_FILE to local directory for embedding..."
     cp "$SOURCE_Q_FILE" "$LOCAL_Q_FILE"
 else
     echo "❌ Error: Source script $SOURCE_Q_FILE not found!"
     exit 1
 fi
 
-# Function to build
-build_bin() {
-    local os=$1
-    local arch=$2
-    local suffix=$3
-    local cgo=$4
+# --- Build Function ---
 
-    echo "📦 Building for $os-$arch (CGO_ENABLED=$cgo)..."
-    CGO_ENABLED=$cgo GOOS=$os GOARCH=$arch go build -ldflags="-s -w" -o $DIST_DIR/$APP_NAME$suffix .
+build_bin() {
+    local goos=$1
+    local goarch=$2
+    local cgo=$3
     
-    if [[ "$os" != "windows" ]]; then
-        chmod +x $DIST_DIR/$APP_NAME$suffix
+    # 1. Map Go OS names to your folder names
+    case "$goos" in
+        darwin)  os_dir="mac" ;;
+        linux)   os_dir="lin" ;;
+        windows) os_dir="win" ;;
+        *)       os_dir="$goos" ;;
+    esac
+
+    # 2. Handle Architecture Subfolders
+    # Only 'mac' uses the nested architecture structure in your manual tree
+    if [[ "$os_dir" == "mac" ]]; then
+        # Map amd64 to x86_64 to match your tree exactly
+        local arch_dir=$(echo "$goarch" | sed 's/amd64/x86_64/')
+        target_dir="$DIST_DIR/$os_dir/$arch_dir"
+    else
+        # 'lin' and 'win' stay flat according to your example
+        target_dir="$DIST_DIR/$os_dir"
+    fi
+
+    mkdir -p "$target_dir"
+    
+    # 3. Handle Extensions
+    local extension=""
+    [[ "$goos" == "windows" ]] && extension=".exe"
+    
+    local output_path="$target_dir/${APP_NAME}${extension}"
+
+    echo "📦 Building $goos ($goarch) -> $output_path"
+    
+    # 4. Execute Build
+    CGO_ENABLED=$cgo GOOS=$goos GOARCH=$goarch \
+    go build -ldflags="-s -w" -o "$output_path" .
+    
+    if [ $? -eq 0 ]; then
+        [[ "$goos" != "windows" ]] && chmod +x "$output_path"
+    else
+        echo "❌ Build failed for $goos-$goarch"
+        exit 1
     fi
 }
 
-# Target selection
-TARGET=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+# --- Target Selection ---
+
+# Convert input to lowercase; default to 'all' if empty
+TARGET=$(echo "${1:-all}" | tr '[:upper:]' '[:lower:]')
 
 case "$TARGET" in
-    linux|l)   build_bin linux amd64 "-linux-x64" 0 ;;
-    windows|w) build_bin windows amd64 ".exe" 0 ;;
+    linux|l)   build_bin linux amd64 0 ;;
+    windows|w) build_bin windows amd64 0 ;;
     mac|m)
-        build_bin darwin arm64 "-mac-arm64" 1
-        build_bin darwin amd64 "-mac-x64" 1
+        build_bin darwin arm64 1
+        build_bin darwin amd64 1
         ;;
-    dev)       build_bin $(go env GOOS) $(go env GOARCH) "" 1 ;;
+    dev)       
+        build_bin $(go env GOOS) $(go env GOARCH) 1 
+        ;;
     *)
-        build_bin darwin arm64 "-mac-arm64" 1
-        build_bin darwin amd64 "-mac-x64" 1
-        build_bin windows amd64 ".exe" 0
-        build_bin linux amd64 "-linux-x64" 0
+        # Default 'all' behavior
+        build_bin darwin arm64 1
+        build_bin darwin amd64 1
+        build_bin windows amd64 0
+        build_bin linux amd64 0
         ;;
 esac
 
-# 2. Cleanup: Remove the temporary copy so it doesn't clutter your repo
-# echo "🧹 Removing temporary local copy of $LOCAL_Q_FILE..."
-# rm -f "$LOCAL_Q_FILE"
-
-echo "✅ Done!"
+echo "✅ Done! Check the $DIST_DIR folder."
