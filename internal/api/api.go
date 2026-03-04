@@ -3,9 +3,11 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,12 +26,12 @@ type KdbRequest struct {
 }
 
 type ApiServer struct {
-	HubPort    string
-	ListenPort string
-	conn       *websocket.Conn
-	callbacks  sync.Map // map[string]chan KdbResponse
+	HubPort     string
+	ListenPort  string
+	conn        *websocket.Conn
+	callbacks   sync.Map // map[string]chan KdbResponse
 	subscribers sync.Map // map[chan []byte]struct{}
-	mu         sync.Mutex
+	mu          sync.Mutex
 }
 
 // Start now accepts certFile and keyFile and decides whether to use TLS
@@ -47,10 +49,12 @@ func Start(hubPort, listenPort, certFile, keyFile string) {
 	mux.HandleFunc("/ping", func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "API is alive") })
 	mux.HandleFunc("/query", s.handleQuery)
 	mux.HandleFunc("/stream", s.handleStream)
-	mux.HandleFunc("/up/", s.handleProcessAction("up", "up"))
-	mux.HandleFunc("/down/", s.handleProcessAction("down", "down"))
-	mux.HandleFunc("/readstack/", s.handleProcessAction("readstack", "readstack"))
-	mux.HandleFunc("/writestack/", s.handleProcessAction("writestack", "writestack"))
+	mux.HandleFunc("/status", s.handleStatus)
+	mux.HandleFunc("/liststacks/", s.handleListStacks)
+	mux.HandleFunc("/readstack/", s.handleReadStack)
+	mux.HandleFunc("/writestack/", s.handleWriteStack)
+	mux.HandleFunc("/up/", s.handleProcessAction("up"))
+	mux.HandleFunc("/down/", s.handleProcessAction("down"))
 
 	// 3. Wrap with CORS Middleware
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -102,7 +106,9 @@ func (s *ApiServer) connectToKdb() {
 			time.Sleep(2 * time.Second)
 			continue
 		}
+		s.mu.Lock()
 		s.conn = c
+		s.mu.Unlock()
 		log.Printf("✅ Connected to kdb hub at %s", url)
 		s.readLoop()
 	}
@@ -110,14 +116,16 @@ func (s *ApiServer) connectToKdb() {
 
 func (s *ApiServer) readLoop() {
 	for {
-		if s.conn == nil {
-			time.Sleep(1 * time.Second)
-			continue
-		}
-		_, message, err := s.conn.ReadMessage()
+		s.mu.Lock()
+		conn := s.conn
+		s.mu.Unlock()
+
+		_, message, err := conn.ReadMessage()
 		if err != nil {
 			log.Println("❌ Kdb read error:", err)
+			s.mu.Lock()
 			s.conn = nil
+			s.mu.Unlock()
 			return
 		}
 
@@ -135,7 +143,11 @@ func (s *ApiServer) readLoop() {
 }
 
 func (s *ApiServer) kdbQuery(cmd string) (json.RawMessage, error) {
-	if s.conn == nil {
+	s.mu.Lock()
+	conn := s.conn
+	s.mu.Unlock()
+
+	if conn == nil {
 		return nil, fmt.Errorf("kdb hub not connected")
 	}
 
@@ -145,12 +157,15 @@ func (s *ApiServer) kdbQuery(cmd string) (json.RawMessage, error) {
 	defer s.callbacks.Delete(cbName)
 
 	s.mu.Lock()
-	err := s.conn.WriteJSON(KdbRequest{Callback: cbName, Cmd: cmd})
+	err := conn.WriteJSON(KdbRequest{Callback: cbName, Cmd: cmd})
 	s.mu.Unlock()
 
 	if err != nil {
 		return nil, err
 	}
+
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
 
 	select {
 	case res := <-ch:
@@ -158,19 +173,100 @@ func (s *ApiServer) kdbQuery(cmd string) (json.RawMessage, error) {
 			return nil, fmt.Errorf("%s", res.Error)
 		}
 		return res.Result, nil
-	case <-time.After(5 * time.Second):
+	case <-timer.C:
 		return nil, fmt.Errorf("kdb timeout")
 	}
 }
 
 func (s *ApiServer) handleQuery(w http.ResponseWriter, r *http.Request) {
-	res, err := s.kdbQuery("4+8") // Example hardcoded query
+	if r.Method != http.MethodPost {
+		http.Error(w, `body must be {"cmd":"..."}`, http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		Cmd string `json:"cmd"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Cmd == "" {
+		http.Error(w, `body must be {"cmd":"..."}`, http.StatusBadRequest)
+		return
+	}
+	res, err := s.kdbQuery(req.Cmd)
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(res)
+}
+
+func (s *ApiServer) handleStatus(w http.ResponseWriter, r *http.Request) {
+	res, err := s.kdbQuery("0!procs")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(res)
+}
+
+func (s *ApiServer) handleListStacks(w http.ResponseWriter, r *http.Request) {
+	res, err := s.kdbQuery("1_key .proc.stacks")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(res)
+}
+
+func (s *ApiServer) handleReadStack(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Path[len("/readstack/"):]
+	if name == "" {
+		http.Error(w, "stack name required", http.StatusBadRequest)
+		return
+	}
+	res, err := s.kdbQuery(fmt.Sprintf("raze readstack[`%s]", name))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// kdb+ returns the file contents as a JSON string — unwrap it
+	var jsonStr string
+	if err := json.Unmarshal(res, &jsonStr); err == nil {
+		res = json.RawMessage(jsonStr)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(res)
+}
+
+func (s *ApiServer) handleWriteStack(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	name := r.URL.Path[len("/writestack/"):]
+	if name == "" {
+		http.Error(w, "stack name required", http.StatusBadRequest)
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "failed to read body", http.StatusBadRequest)
+		return
+	}
+	if !json.Valid(body) {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	jsonStr := strings.ReplaceAll(string(body), `\`, `\\`)
+	jsonStr = strings.ReplaceAll(jsonStr, `"`, `\"`)
+	_, err = s.kdbQuery(fmt.Sprintf("writestack[`%s;enlist \"%s\"]", name, jsonStr))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"status":"ok","stack":"%s"}`, name)
 }
 
 func (s *ApiServer) broadcast(msg []byte) {
@@ -213,14 +309,19 @@ func (s *ApiServer) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *ApiServer) handleProcessAction(action, kdbFunc string) http.HandlerFunc {
+func (s *ApiServer) handleProcessAction(action string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		name := r.URL.Path[len("/"+action+"/"):]
-		_, err := s.kdbQuery(fmt.Sprintf("%s[`%s]", kdbFunc, name))
-		if err != nil {
-			http.Error(w, err.Error(), 500)
+		if name == "" {
+			http.Error(w, "process name required", http.StatusBadRequest)
 			return
 		}
-		fmt.Fprintf(w, `{"status":"%sed", "process":"%s"}`, action, name)
+		_, err := s.kdbQuery(fmt.Sprintf("%s[`%s]", action, name))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"status":"%s","process":"%s"}`, action, name)
 	}
 }
