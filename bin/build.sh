@@ -7,14 +7,14 @@ LOCAL_Q_FILE="./qi.q"
 
 # --- Cleanup & Setup ---
 
-cleanup() {
-    if [ -f "$LOCAL_Q_FILE" ]; then
-        echo "🧹 Cleaning up temporary file..."
-        rm -f "$LOCAL_Q_FILE"
-    fi
-}
+#cleanup() {
+   # if [ -f "$LOCAL_Q_FILE" ]; then
+  #      echo "🧹 Cleaning up temporary file..."
+ #       rm -f "$LOCAL_Q_FILE"
+#    fi
+#}
 # Trap ensures cleanup happens even if the script fails
-trap cleanup EXIT
+#trap cleanup EXIT
 
 echo "🚀 Starting build process..."
 mkdir -p "$DIST_DIR"
