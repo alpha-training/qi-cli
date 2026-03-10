@@ -30,8 +30,18 @@ type AppConfig struct {
 }
 
 func main() {
+
 	// 1. Load configuration from ~/.qi/qi.conf with OS-aware defaults
 	appConf := loadQiConfig()
+
+	qiPath, err := os.Executable()
+	if err != nil {
+		qiPath = os.Args[0] // Fallback to args if Executable() fails
+	}
+
+	if absPath, err := filepath.Abs(qiPath); err == nil {
+		qiPath = absPath
+	}
 
 	// --- 2. API Mode Detection ---
 	if len(os.Args) > 1 && os.Args[1] == "api" {
@@ -77,7 +87,7 @@ func main() {
 	qArgs := append([]string{bootstrapPath}, os.Args[1:]...)
 	cmd := buildCommand(qPath, qArgs, conf)
 
-	cmd.Env = prepareEnv(conf)
+	cmd.Env = prepareEnv(conf, qiPath)
 	cmd.Dir = "."
 	cmd.Stdout, cmd.Stderr, cmd.Stdin = os.Stdout, os.Stderr, os.Stdin
 
@@ -173,12 +183,13 @@ func buildCommand(qPath string, qArgs []string, conf kdb.Config) *exec.Cmd {
 	return exec.Command(qPath, qArgs...)
 }
 
-func prepareEnv(conf kdb.Config) []string {
+func prepareEnv(conf kdb.Config, qiPath string) []string {
 	// Start with a clean copy of the current environment
 	env := os.Environ()
-	
+
 	// Add QHOME
 	env = append(env, "QHOME="+conf.QHome)
+	env = append(env, "QI_CMD="+qiPath)
 
 	// 1. Get SSL fixes from doctor (sets SSL_VERIFY_SERVER=NO for Windows)
 	sslFixes := doctor.ResolveSSL(runtime.GOOS)
