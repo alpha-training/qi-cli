@@ -6,59 +6,71 @@ import (
 	"runtime"
 )
 
-// ResolveSSL takes the osName (e.g., "darwin", "linux", "windows")
-// and returns a map of environment variables required for kdb+ SSL.
+// ResolveSSL identifies the OS and returns a map of environment variables
+// that force kdb+ to find the correct OpenSSL libraries and skip verification.
 func ResolveSSL(osName string) map[string]string {
 	fixes := make(map[string]string)
 	arch := runtime.GOARCH
 
 	switch osName {
 	case "windows":
-		// Windows: Typically just needs the verification bypass
 		if os.Getenv("SSL_VERIFY_SERVER") == "" {
 			fixes["SSL_VERIFY_SERVER"] = "NO"
 		}
 
 	case "darwin":
-		// macOS: The critical issue is finding libssl.1.1.dylib
-		// Apple Silicon (arm64) Homebrew uses /opt/homebrew
-		// Intel (amd64) Homebrew uses /usr/local
-		homebrewPath := "/opt/homebrew"
+		// 1. Determine Homebrew base path based on Architecture
+		brewBase := "/opt/homebrew"
 		if arch == "amd64" {
-			homebrewPath = "/usr/local"
+			brewBase = "/usr/local"
 		}
 
-		sslLibPath := fmt.Sprintf("%s/opt/openssl@1.1/lib", homebrewPath)
-		sslCertFile := fmt.Sprintf("%s/etc/openssl@1.1/cert.pem", homebrewPath)
+		// 2. Search for ANY available OpenSSL version (3 is the new default)
+		// We check 3, 3.0, and 1.1 in order of modern preference.
+		versions := []string{"openssl@3", "openssl@3.0", "openssl@1.1"}
+		var foundLibPath string
+		var foundCertPath string
 
-		// 1. Point kdb+ to the physical OpenSSL 1.1 .dylib files
-		if _, err := os.Stat(sslLibPath); err == nil {
+		for _, v := range versions {
+			libPath := fmt.Sprintf("%s/opt/%s/lib", brewBase, v)
+			certPath := fmt.Sprintf("%s/etc/%s/cert.pem", brewBase, v)
+
+			if _, err := os.Stat(libPath); err == nil {
+				foundLibPath = libPath
+				// If we found the lib, check if the cert exists in the same version
+				if _, err := os.Stat(certPath); err == nil {
+					foundCertPath = certPath
+				}
+				break
+			}
+		}
+
+		// 3. Apply the fixes if libraries were found
+		if foundLibPath != "" {
+			// This tells kdb+ exactly where to look for .dylib files
+			// without needing symlinks in /usr/local/lib
 			existingDyld := os.Getenv("DYLD_LIBRARY_PATH")
 			if existingDyld != "" {
-				fixes["DYLD_LIBRARY_PATH"] = sslLibPath + ":" + existingDyld
+				fixes["DYLD_LIBRARY_PATH"] = foundLibPath + ":" + existingDyld
 			} else {
-				fixes["DYLD_LIBRARY_PATH"] = sslLibPath
+				fixes["DYLD_LIBRARY_PATH"] = foundLibPath
+			}
+
+			if foundCertPath != "" {
+				fixes["SSL_CA_CERT_FILE"] = foundCertPath
 			}
 		} else {
-			// If the library is missing entirely, we can't fix it with env vars.
-			fmt.Printf("⚠️  OpenSSL 1.1 not found at %s. \nRun: brew install openssl@1.1\n", sslLibPath)
+			// If we literally can't find OpenSSL anywhere, we warn the user.
+			fmt.Println("❌ Error: OpenSSL not detected. Please run 'brew install openssl'")
 		}
 
-		// 2. Point to the CA bundle provided by Homebrew
-		if _, err := os.Stat(sslCertFile); err == nil {
-			fixes["SSL_CA_CERT_FILE"] = sslCertFile
-		}
-
-		// 3. Set the verification bypass if not already set
-		if os.Getenv("SSL_VERIFY_SERVER") == "" {
-			fixes["SSL_VERIFY_SERVER"] = "NO"
-		}
+		// 4. Force bypass to solve the "Protocol not available" error
+		fixes["SSL_VERIFY_SERVER"] = "NO"
 
 	case "linux":
-		// Linux: Standard CA certificate bundle paths
 		certPaths := []string{
-			"/etc/pki/tls/certs/ca-bundle.crt",   // RHEL/CentOS
-			"/etc/ssl/certs/ca-certificates.crt", // Ubuntu/Debian
+			"/etc/pki/tls/certs/ca-bundle.crt",
+			"/etc/ssl/certs/ca-certificates.crt",
 		}
 
 		found := false
@@ -71,7 +83,6 @@ func ResolveSSL(osName string) map[string]string {
 		}
 
 		if !found && os.Getenv("SSL_VERIFY_SERVER") == "" {
-			fmt.Println("⚠️  No system SSL certificates found. Suggesting SSL_VERIFY_SERVER=NO")
 			fixes["SSL_VERIFY_SERVER"] = "NO"
 		}
 	}
